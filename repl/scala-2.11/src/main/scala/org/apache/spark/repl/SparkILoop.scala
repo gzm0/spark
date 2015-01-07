@@ -29,7 +29,10 @@ class SparkILoop(in0: Option[BufferedReader], out: JPrintWriter)
   def this(in0: BufferedReader, out: JPrintWriter) = this(Some(in0), out)
   def this() = this(None, new JPrintWriter(Console.out, true))
 
-  private def initializeSpark() {
+  private def initializeSpark(): Unit = {
+    // Call process line to await initialization of compiler
+    processLine(null)
+
     intp.beQuietDuring {
       command( """
          @transient val sc = {
@@ -43,9 +46,7 @@ class SparkILoop(in0: Option[BufferedReader], out: JPrintWriter)
   }
 
   /** Print a welcome message */
-  override def printWelcome() {
-    initializeSpark()
-
+  override def printWelcome(): Unit = {
     echo("""Welcome to
       ____              __
      / __/__  ___ _____/ /__
@@ -53,11 +54,11 @@ class SparkILoop(in0: Option[BufferedReader], out: JPrintWriter)
    /___/ .__/\_,_/_/ /_/\_\   version %s
       /_/
          """.format(SPARK_VERSION))
-    val welcomeMsg = "Using Scala %s (%s, Java %s)".format(
-      versionString, javaVmName, javaVersion)
-    echo(welcomeMsg)
+    echo(s"Using Scala $versionString ($javaVmName, Java $javaVersion)")
     echo("Type in expressions to have them evaluated.")
     echo("Type :help for more information.")
+
+    initializeSpark()
   }
 
 }
