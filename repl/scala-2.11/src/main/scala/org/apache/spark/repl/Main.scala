@@ -21,7 +21,7 @@ import org.apache.spark.util.Utils
 import org.apache.spark._
 
 import scala.tools.nsc.Settings
-import scala.tools.nsc.interpreter.SparkILoop
+import scala.tools.nsc.interpreter.ILoop
 
 object Main extends Logging {
 
@@ -41,6 +41,7 @@ object Main extends Logging {
     // Start the classServer and store its URI in a spark system property
     // (which will be passed to executors so that they can connect to it)
     classServer.start()
+    s.processArguments(args.toList, true)
     interp.process(s) // Repl starts and goes in loop of R.E.P.L
     classServer.stop()
     Option(sparkContext).map(_.stop)
@@ -82,4 +83,88 @@ object Main extends Logging {
     }
     master
   }
+  
+}
+
+import scala.tools.nsc._
+import interpreter._
+import scala.language.{ implicitConversions, existentials }
+import scala.annotation.tailrec
+//import Predef.{ println => _, _ }
+import interpreter.session._
+import StdReplTags._
+import scala.reflect.api.{Mirror, Universe, TypeCreator}
+import scala.util.Properties.{ jdkHome, javaVersion, versionString, javaVmName }
+import scala.tools.nsc.util.{ ClassPath, Exceptional, stringFromWriter, stringFromStream }
+import scala.reflect.{ClassTag, classTag}
+import scala.reflect.internal.util.{ BatchSourceFile, ScalaClassLoader }
+import ScalaClassLoader._
+import scala.reflect.io.{ File, Directory }
+import scala.tools.util._
+import scala.collection.generic.Clearable
+import scala.concurrent.{ ExecutionContext, Await, Future, future }
+import ExecutionContext.Implicits._
+import java.io.{ BufferedReader, FileReader }
+
+class SparkILoop extends ILoop {
+
+  private def initializeSpark() {
+    intp.beQuietDuring {
+      command( """
+         @transient val sc = {
+           val _sc = org.apache.spark.repl.Main.createSparkContext()
+           println("Spark context available as sc.")
+           _sc
+         }
+               """)
+      command("import org.apache.spark.SparkContext._")
+    }
+  }
+
+  /** Print a welcome message */
+  override def printWelcome() {
+    initializeSpark()
+
+    import org.apache.spark.SPARK_VERSION
+    echo("""Welcome to
+      ____              __
+     / __/__  ___ _____/ /__
+    _\ \/ _ \/ _ `/ __/  '_/
+   /___/ .__/\_,_/_/ /_/\_\   version %s
+      /_/
+         """.format(SPARK_VERSION))
+    val welcomeMsg = "Using Scala %s (%s, Java %s)".format(
+      versionString, javaVmName, javaVersion)
+    echo(welcomeMsg)
+    echo("Type in expressions to have them evaluated.")
+    echo("Type :help for more information.")
+  }
+
+  /** Standard commands **/
+  // TODO leave like that?
+  /*
+  override lazy val standardCommands = List(
+    cmd("cp", "<path>", "add a jar or directory to the classpath", addClasspath),
+    cmd("edit", "<id>|<line>", "edit history", editCommand),
+    cmd("help", "[command]", "print this summary or command-specific help", helpCommand),
+    historyCommand,
+    cmd("h?", "<string>", "search the history", searchHistory),
+    cmd("imports", "[name name ...]", "show import history, identifying sources of names", importsCommand),
+    //cmd("implicits", "[-v]", "show the implicits in scope", intp.implicitsCommand),
+    cmd("javap", "<path|class>", "disassemble a file or class name", javapCommand),
+    cmd("line", "<id>|<line>", "place line(s) at the end of history", lineCommand),
+    cmd("load", "<path>", "interpret lines in a file", loadCommand),
+    cmd("paste", "[-raw] [path]", "enter paste mode or paste a file", pasteCommand),
+    // nullary("power", "enable power user mode", powerCmd),
+    nullary("quit", "exit the interpreter", () => Result(keepRunning = false, None)),
+    nullary("replay", "reset execution and replay all previous commands", replay),
+    nullary("reset", "reset the repl to its initial state, forgetting all session entries", resetCommand),
+    cmd("save", "<path>", "save replayable session to a file", saveCommand),
+    shCommand,
+    cmd("settings", "[+|-]<options>", "+enable/-disable flags, set compiler options", changeSettings),
+    nullary("silent", "disable/enable automatic printing of results", verbosity),
+//    cmd("type", "[-v] <expr>", "display the type of an expression without evaluating it", typeCommand),
+//    cmd("kind", "[-v] <expr>", "display the kind of expression's type", kindCommand),
+    nullary("warnings", "show the suppressed warnings from the most recent line which had any", warningsCommand)
+  )*/
 }
