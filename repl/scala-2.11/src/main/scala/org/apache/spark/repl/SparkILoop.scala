@@ -17,11 +17,17 @@
 
 package org.apache.spark.repl
 
-import scala.tools.nsc.interpreter.ILoop
+import scala.tools.nsc.interpreter.{ ILoop, JPrintWriter }
 import scala.util.Properties.{ javaVersion, versionString, javaVmName }
 import org.apache.spark.SPARK_VERSION
 
-class SparkILoop extends ILoop {
+import java.io.BufferedReader
+
+class SparkILoop(in0: Option[BufferedReader], out: JPrintWriter)
+    extends ILoop(in0, out) {
+
+  def this(in0: BufferedReader, out: JPrintWriter) = this(Some(in0), out)
+  def this() = this(None, new JPrintWriter(Console.out, true))
 
   private def initializeSpark() {
     intp.beQuietDuring {

@@ -23,7 +23,6 @@ import java.net.URLClassLoader
 import scala.collection.mutable.ArrayBuffer
 import scala.concurrent.Await
 import scala.concurrent.duration._
-import scala.tools.nsc.interpreter.SparkILoop
 
 import com.google.common.io.Files
 import org.scalatest.FunSuite
@@ -91,7 +90,7 @@ class ReplSuite extends FunSuite {
       settings.usejavacp.value = true
       org.apache.spark.repl.Main.interp = this
       override def createInterpreter() {
-        intp = new SparkILoopInterpreter
+        intp = new ILoopInterpreter
         intp.setContextClassLoader()
       }
     }
