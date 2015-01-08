@@ -172,10 +172,10 @@ trait SparkImports {
           case x =>
             for (imv <- x.definedNames) {
               if (currentImps contains imv) addWrapper()
-              val objName = req.lineRep.readPath
+              val objName = req.lineRep.readPath + ".INSTANCE"
               val valName = "$VAL" + newValId()
               if(!code.toString.endsWith(".`" + imv + "`;\n")) { // Which means already imported
-                code.append("val " + valName + " = " + objName + ".INSTANCE\n")
+                code.append("val " + valName + ": " + objName + ".type = " + objName + "\n")
                 code.append("import " + valName + req.accessPath + ".`" + imv + "`;\n")
               }
               currentImps += imv

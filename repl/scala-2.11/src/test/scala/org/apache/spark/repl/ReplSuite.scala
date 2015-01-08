@@ -323,4 +323,14 @@ class ReplSuite extends FunSuite {
     assertDoesNotContain("Exception", output)
     assertContains("ret: Array[Foo] = Array(Foo(1),", output)
   }
+
+  test("SPARK-5149 Dependent types") {
+    val output = runInterpreter("local",
+    """
+      |class A; def foo(x: A) = x
+      |foo(new A)
+    """.stripMargin)
+    assertDoesNotContain("error:", output)
+    assertDoesNotContain("Exception", output)
+  }
 }
