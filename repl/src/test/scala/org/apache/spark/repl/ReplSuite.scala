@@ -21,15 +21,12 @@ import java.io._
 import java.net.URLClassLoader
 
 import scala.collection.mutable.ArrayBuffer
-import scala.concurrent.Await
-import scala.concurrent.duration._
 
 import com.google.common.io.Files
 import org.scalatest.FunSuite
-import org.apache.commons.lang3.StringEscapeUtils
 import org.apache.spark.SparkContext
+import org.apache.commons.lang3.StringEscapeUtils
 import org.apache.spark.util.Utils
-
 
 
 class ReplSuite extends FunSuite {
@@ -55,9 +52,7 @@ class ReplSuite extends FunSuite {
     System.setProperty(CONF_EXECUTOR_CLASSPATH, classpath)
 
     System.setProperty("spark.master", master)
-    val interp = {
-      new SparkILoop(in, new PrintWriter(out))
-    }
+    val interp = new SparkILoop(in, new PrintWriter(out), Main.outputDir)
     org.apache.spark.repl.Main.interp = interp
     Main.s.processArguments(List("-classpath", classpath), true)
     Main.main(Array()) // call main
@@ -85,12 +80,12 @@ class ReplSuite extends FunSuite {
 
   test("propagation of local properties") {
     // A mock ILoop that doesn't install the SIGINT handler.
-    class ILoop(out: PrintWriter) extends SparkILoop(None, out) {
+    class ILoop(out: PrintWriter) extends SparkILoop(None, out, Main.outputDir) {
       settings = new scala.tools.nsc.Settings
       settings.usejavacp.value = true
       org.apache.spark.repl.Main.interp = this
       override def createInterpreter() {
-        intp = new ILoopInterpreter
+        intp = new SparkILoopInterpreter
         intp.setContextClassLoader()
       }
     }
@@ -195,8 +190,7 @@ class ReplSuite extends FunSuite {
   }
 
   test("interacting with files") {
-    val tempDir = Files.createTempDir()
-    tempDir.deleteOnExit()
+    val tempDir = Utils.createTempDir()
     val out = new FileWriter(tempDir + "/input")
     out.write("Hello world!\n")
     out.write("What's up?\n")

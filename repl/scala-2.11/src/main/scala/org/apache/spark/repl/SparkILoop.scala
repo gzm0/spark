@@ -17,8 +17,11 @@
 
 package org.apache.spark.repl
 
-import scala.tools.nsc.interpreter.{ ILoop, JPrintWriter }
+import scala.tools.nsc._
+import scala.tools.nsc.interpreter._
+
 import scala.util.Properties.{ javaVersion, versionString, javaVmName }
+
 import org.apache.spark.SPARK_VERSION
 
 import java.io.BufferedReader
@@ -61,4 +64,22 @@ class SparkILoop(in0: Option[BufferedReader], out: JPrintWriter)
     initializeSpark()
   }
 
+  override def createInterpreter(): Unit = {
+    if (addedClasspath != "")
+      settings.classpath append addedClasspath
+
+    intp = new SparkILoopInterpreter
+  }
+
+  class SparkILoopInterpreter extends ILoopInterpreter {
+     override protected def newCompiler(settings: Settings,
+         reporter: reporters.Reporter): ReplGlobal = {
+       settings.outputDirs setSingleOutput replOutput.dir
+       settings.exposeEmptyPackage.value = true
+       println("My global!!!!!!!!!")
+       new Global(settings, reporter) with ReplGlobal {
+         override def toString: String = "<global>"
+       }
+     }
+  }
 }

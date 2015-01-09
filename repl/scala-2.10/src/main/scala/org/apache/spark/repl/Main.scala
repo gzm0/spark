@@ -17,17 +17,69 @@
 
 package org.apache.spark.repl
 
-import scala.collection.mutable.Set
+import org.apache.spark.util.Utils
+import org.apache.spark._
 
-object Main {
-  private var _interp: SparkILoop = _
+import scala.tools.nsc.Settings
 
-  def interp = _interp
+object Main extends Logging {
 
-  def interp_=(i: SparkILoop) { _interp = i }
+  val conf = new SparkConf()
+  val tmp = System.getProperty("java.io.tmpdir")
+  val rootDir = conf.get("spark.repl.classdir", tmp)
+  val outputDir = Utils.createTempDir(rootDir)
+  val s = new Settings()
+  val classServer = new HttpServer(outputDir, new SecurityManager(conf))
+  var sparkContext: SparkContext = _
+  var interp = new SparkILoop(outputDir) // this is a public var because tests reset it.
 
   def main(args: Array[String]) {
-    _interp = new SparkILoop
-    _interp.process(args)
+    if (getMaster == "yarn-client") System.setProperty("SPARK_YARN_MODE", "true")
+    // Start the classServer and store its URI in a spark system property
+    // (which will be passed to executors so that they can connect to it)
+    classServer.start()
+
+    s.processArguments(args.toList, true)
+    interp.process(s) // Repl starts and goes in loop of R.E.P.L
+    classServer.stop()
+    Option(sparkContext).map(_.stop)
   }
+
+  private def getAddedJars: Array[String] = {
+    val envJars = sys.env.get("ADD_JARS")
+    val propJars = sys.props.get("spark.jars").flatMap { p => if (p == "") None else Some(p) }
+    val jars = propJars.orElse(envJars).getOrElse("")
+    Utils.resolveURIs(jars).split(",").filter(_.nonEmpty)
+  }
+
+  // This is called by the code injected into the REPL via reflection
+  def createSparkContext(): SparkContext = {
+    val execUri = System.getenv("SPARK_EXECUTOR_URI")
+    val jars = getAddedJars
+    val conf = new SparkConf()
+      .setMaster(getMaster)
+      .setAppName("Spark shell")
+      .setJars(jars)
+      .set("spark.repl.class.uri", classServer.uri)
+    logInfo("Spark class server started at " + classServer.uri)
+    if (execUri != null) {
+      conf.set("spark.executor.uri", execUri)
+    }
+    if (System.getenv("SPARK_HOME") != null) {
+      conf.setSparkHome(System.getenv("SPARK_HOME"))
+    }
+    sparkContext = new SparkContext(conf)
+    logInfo("Created spark context..")
+    sparkContext
+  }
+
+  private def getMaster: String = {
+    val master = {
+      val envMaster = sys.env.get("MASTER")
+      val propMaster = sys.props.get("spark.master")
+      propMaster.orElse(envMaster).getOrElse("local[*]")
+    }
+    master
+  }
+
 }

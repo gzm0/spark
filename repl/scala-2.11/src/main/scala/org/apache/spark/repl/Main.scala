@@ -29,8 +29,8 @@ object Main extends Logging {
   val rootDir = conf.get("spark.repl.classdir", tmp)
   val outputDir = Utils.createTempDir(rootDir)
   val s = new Settings()
-  s.processArguments(List("-Yrepl-class-based",
-    "-Yrepl-outdir", s"${outputDir.getAbsolutePath}", "-Yrepl-sync"), true)
+  s.processArguments(List("-Yrepl-outdir",
+      s"${outputDir.getAbsolutePath}"), true)
   val classServer = new HttpServer(outputDir, new SecurityManager(conf))
   var sparkContext: SparkContext = _
   var interp = new SparkILoop // this is a public var because tests reset it.
@@ -45,7 +45,6 @@ object Main extends Logging {
     classServer.stop()
     Option(sparkContext).map(_.stop)
   }
-
 
   private def getAddedJars: Array[String] = {
     val envJars = sys.env.get("ADD_JARS")
