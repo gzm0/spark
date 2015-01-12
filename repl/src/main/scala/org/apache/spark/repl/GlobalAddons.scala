@@ -34,11 +34,18 @@ trait GlobalAddons {
 
   lazy val usesReplObjectAnnot = getRequiredClass("org.apache.spark.repl.UsesReplObjects")
 
-  def isReplTopLevel(sym: Symbol) =
-    !sym.isConstructor && isReplName(sym.fullName, true)
+  def isReplState(sym: Symbol): Boolean =
+    (sym.isVal || sym.isVar) && isReplName(sym.fullName, topLevel = true)
 
-  def isReplDefinedClass(sym: Symbol) =
-    sym.isClass && !sym.isModuleClass && isReplName(sym.fullName, false)
+  def canCaptureReplState(sym: Symbol): Boolean = {
+    (
+        sym.isMethod && !sym.isConstructor &&
+        isReplName(sym.fullName, topLevel = true)
+    ) || (
+        sym.isClass && !sym.isModuleClass && sym.isSerializable &&
+        isReplName(sym.fullName, topLevel = false)
+    )
+  }
 
   private def isReplName(name: String, topLevel: Boolean) = {
     import sessionNames._

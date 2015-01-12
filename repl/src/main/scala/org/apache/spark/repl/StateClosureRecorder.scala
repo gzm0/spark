@@ -46,79 +46,51 @@ trait StateClosureRecorder extends plugins.PluginComponent
   override protected def newTransformer(unit: CompilationUnit) =
     new StateClosureRecorderTransformer
 
-  // Cases to take care of:
-
-  /*
-   * var x = 1
-   * def foo = x + 1
-   *
-   * // Send this
-   * case class A(x: Int) { def bar = foo + x }
-   *
-   *
-   * // Create closure on worker
-   * sc.par(1 to 10).map(x => new A(x))
-   */
-
-
-
   class StateClosureRecorderTransformer extends Transformer {
-
     type UsageRecord = mutable.Map[Symbol, mutable.Buffer[Symbol]]
 
     var currentClosure: Symbol = _
 
     val instantiatedClasses: UsageRecord = mutable.Map.empty
-    val usedState: UsageRecord = mutable.Map.empty
-    val usedMethods: UsageRecord = mutable.Map.empty
+    val usedTerms: UsageRecord = mutable.Map.empty
 
-    override def transform(tree: Tree): Tree = tree match {
-      case DefDef(_, _, _, _, _, rhs) if isReplTopLevel(tree.symbol) =>
-        val sym = tree.symbol
+    override def transform(tree: Tree): Tree = {
+      val sym = tree.symbol
+      tree match {
+        case defDef: DefDef if canCaptureReplState(sym) =>
+          withClosure(sym) { transform(defDef.rhs) }
+          storeUsage(sym)
+          tree
 
-        withClosure(sym)(transform(rhs))
-        storeUsage(sym)
+        case classDef: ClassDef if canCaptureReplState(sym) =>
+          withClosure(sym) { transform(classDef.impl) }
+          storeUsage(sym)
+          tree
 
-        tree
+        case sel: Select if isReplState(sym) =>
+          recordUsage(sym, usedTerms)
+          tree
 
-      case ClassDef(_, _, _, impl)
-          if tree.symbol.isSerializable && !tree.symbol.isModuleClass =>
+        case sel: Select if canCaptureReplState(sym) =>
+          recordUsage(tree.symbol, usedTerms)
+          tree
 
-        val sym = tree.symbol
+        case New(tpt) if canCaptureReplState(tpt.symbol) =>
+          recordUsage(tpt.symbol, instantiatedClasses)
+          tree
 
-        withClosure(sym)(transform(impl))
-        storeUsage(sym)
+        case fun: Function =>
+          failOnFunction(phaseName, fun)
 
-        tree
-
-      case sel: Select if isReplTopLevel(tree.symbol) =>
-        val sym = tree.symbol
-
-        if (sym.isVal || sym.isVar) {
-          recordUsage(sym, usedState)
-        } else if (sym.isMethod) {
-          recordUsage(sym, usedMethods)
-        }
-
-        tree
-
-      case New(tpt) if isReplDefinedClass(tpt.symbol) =>
-        recordUsage(tpt.symbol, instantiatedClasses)
-
-        tree
-
-      case fun: Function =>
-        failOnFunction(phaseName, fun)
-
-      case _ =>
-        super.transform(tree)
+        case _ =>
+          super.transform(tree)
+      }
     }
 
     private def storeUsage(trgSym: Symbol) = {
       val args =
         instantiatedClasses.getOrElse(trgSym, Nil).map(sym => TypeTree(sym.tpe)) ++
-        usedState.getOrElse(trgSym, Nil).map(Ident(_)) ++
-        usedMethods.getOrElse(trgSym, Nil).map(Ident(_))
+        usedTerms.getOrElse(trgSym, Nil).map(Ident(_))
 
       val typedArgs = args.map(typer.typed)
 

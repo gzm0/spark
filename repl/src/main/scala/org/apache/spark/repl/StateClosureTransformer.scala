@@ -58,42 +58,52 @@ trait StateClosureTransformer extends plugins.PluginComponent
    *
    * // Create closure on worker
    * sc.par(1 to 10).map(x => new A(x))
+   *
+   * // use a state capturing method on worker:
+   * def bar(y: Int) = x + y
+   * sc.par(1 to 10).map(bar)
    */
 
   class StateClosureTransformer extends Transformer {
+    override def transform(tree: Tree): Tree = {
+      val sym = tree.symbol
+      tree match {
+        case classDef: ClassDef if canCaptureReplState(sym) =>
+          val neededState = calculateClosedState(sym)
+          val transformedImpl = transformTemplate(classDef.impl)
 
-    override def transform(tree: Tree): Tree = tree match {
+          if (neededState.nonEmpty) {
+            ???
+          } else {
+            import classDef._
+            treeCopy.ClassDef(classDef, mods, name, tparams, transformedImpl)
+          }
 
-      case ClassDef(_, _, _, impl)
-          if tree.symbol.isSerializable && !tree.symbol.isModuleClass =>
-        val neededState = calculateClosedState(tree.symbol)
+        case defDef: DefDef if canCaptureReplState(sym) =>
+          val neededState = calculateClosedState(sym)
+          val transformedRhs = transform(defDef.rhs)
 
-        println(tree.symbol.annotations)
-        println(s"${tree.symbol.fullName} needs state: $neededState")
+          if (neededState.nonEmpty) {
+            ???
+          } else {
+            import defDef._
+            treeCopy.DefDef(defDef, mods, name, tparams, vparamss, tpt, transformedRhs)
+          }
 
-        transform(impl)
+        case fun: Function =>
+          failOnFunction(phaseName, fun)
 
-        tree
-
-      case DefDef(_, _, _, _, _, rhs) if isReplTopLevel(tree.symbol) =>
-        val neededState = calculateClosedState(tree.symbol)
-
-        println(tree.symbol.annotations)
-        println(s"${tree.symbol.fullName} needs state: $neededState")
-
-        transform(rhs)
-
-        tree
-
-      case fun: Function =>
-        failOnFunction(phaseName, fun)
-
-      case _ =>
-        super.transform(tree)
+        case _ =>
+          super.transform(tree)
+      }
     }
   }
 
-  def calculateClosedState(sym: Symbol): Set[Symbol] = {
+  /** Fixpoint of the state needed by a given symbol based on annotation.
+   *  A basic call-stack based DFS
+   *  TODO cache this?
+   */
+  private def calculateClosedState(sym: Symbol): Set[Symbol] = {
     val seen = mutable.Set.empty[Symbol]
     val neededState = mutable.Set.empty[Symbol]
 
