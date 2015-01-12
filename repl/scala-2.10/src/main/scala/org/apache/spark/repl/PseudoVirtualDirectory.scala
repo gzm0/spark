@@ -67,7 +67,7 @@ private class PseudoVirtualDirectory(_dir: File, name: String,
     fileOrSubdirectoryNamed(name, true)
 
   override def clear(): Unit = {
-    // Another abuse to use its functions
+    // Another abuse to use deleteRecursively
     val dir = new Directory(_dir)
     dir.deleteRecursively()
     dir.createDirectory()

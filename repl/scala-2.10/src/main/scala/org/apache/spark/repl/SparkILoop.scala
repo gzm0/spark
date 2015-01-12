@@ -23,6 +23,7 @@ import scala.reflect.io.VirtualDirectory
 
 import scala.tools.nsc._
 import scala.tools.nsc.interpreter._
+import scala.tools.nsc.plugins.Plugin
 
 import scala.util.Properties.{ javaVersion, versionString, javaVmName }
 
@@ -84,10 +85,20 @@ class SparkILoop(in0: Option[BufferedReader], out: JPrintWriter, outDir: File)
         reporter: reporters.Reporter): ReplGlobal = {
       settings.outputDirs setSingleOutput virtualDirectory
       settings.exposeEmptyPackage.value = true
-      println("My global!!!!!!!!!")
-      new Global(settings, reporter) with ReplGlobal {
+
+      lazy val global: ReplGlobal = new Global(settings, reporter) with ReplGlobal {
         override def toString: String = "<global>"
+
+        private lazy val sparkPlugin = new SparkREPLPlugin(global) {
+          def naming: Naming = SparkILoopInterpreter.this.naming
+        }
+
+        // Include the Spark REPL plugin
+        override protected def loadRoughPluginsList(): List[Plugin] =
+           sparkPlugin :: super.loadRoughPluginsList()
       }
+
+      global
     }
   }
 }
