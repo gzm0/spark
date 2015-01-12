@@ -103,9 +103,6 @@ trait StateClosureRecorder extends plugins.PluginComponent
         tree
 
       case New(tpt) if isReplDefinedClass(tpt.symbol) =>
-        println("Found new: " + tpt.symbol.fullName)
-        println(" in " + currentClosure)
-
         recordUsage(tpt.symbol, instantiatedClasses)
 
         tree
@@ -127,24 +124,6 @@ trait StateClosureRecorder extends plugins.PluginComponent
 
       trgSym.addAnnotation(usesReplObjectAnnot, typedArgs: _*)
     }
-
-    // FIXME Remove
-    /*
-    private def reportUsage(sym: Symbol) = {
-      def reportInner(title: String, target: UsageRecord) = {
-        val syms = target.getOrElse(sym, Nil)
-        if (syms.nonEmpty) {
-          println(title)
-          syms.foreach(s => println(s"  ${s.fullName}"))
-        }
-      }
-
-      println(s"${sym.fullName} uses:")
-      reportInner("State: ", usedState)
-      reportInner("Methods: ", usedMethods)
-      reportInner("Classes: ", instantiatedClasses)
-    }
-    */
 
     private def recordUsage(sym: Symbol, target: UsageRecord) = {
       if (currentClosure != null) {
