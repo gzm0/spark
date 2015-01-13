@@ -35,31 +35,41 @@ trait GlobalAddons {
   lazy val usesReplObjectAnnot = getRequiredClass("org.apache.spark.repl.UsesReplObjects")
 
   def isReplState(sym: Symbol): Boolean =
-    (sym.isVal || sym.isVar) && isReplName(sym.fullName, topLevel = true)
+    (sym.isVal || sym.isVar) && isReplSym(sym, topLevel = true)
 
   def canCaptureReplState(sym: Symbol): Boolean = {
-    (
-        sym.isMethod && !sym.isConstructor &&
-        isReplName(sym.fullName, topLevel = true)
-    ) || (
-        sym.isClass && !sym.isModuleClass && sym.isSerializable &&
-        isReplName(sym.fullName, topLevel = false)
-    )
+    sym.isMethod && !sym.isConstructor && isReplSym(sym, topLevel = true) ||
+    (sym.isClass || sym.isTrait) && !sym.isModuleClass &&
+    // hack to avoid lazy val deadlock upon init
+    sym.fullName != "$repl_$init" &&
+    isReplSym(sym, topLevel = false)
   }
 
-  private def isReplName(name: String, topLevel: Boolean) = {
+  private def isReplSym(sym: Symbol, topLevel: Boolean) = {
     import sessionNames._
 
-    val parts = name.split('.')
+    val parts = sym.fullName.split('.')
+    val partsCount = parts.length
 
     def isLineName(str: String) =
       str.startsWith(line) &&
       scala.util.Try(str.stripPrefix(line).toInt).isSuccess
 
-    (parts.length >= 3) &&
+    @annotation.tailrec
+    def isWrapOnly(str: String): Boolean = {
+      if (str.startsWith(read)) {
+        isWrapOnly(str.stripPrefix(read))
+      } else if (str.startsWith("$$iw")) {
+        isWrapOnly(str.stripPrefix("$$iw"))
+      } else {
+        str.isEmpty
+      }
+    }
+
+    (partsCount >= 3) &&
     isLineName(parts(0)) &&
     parts(1) == read &&
-    (!topLevel || parts.slice(2, parts.length - 1).forall(_ == "$iw"))
+    (!topLevel || parts.slice(2, partsCount - 1).forall(_ == "$iw"))
   }
 
   def failOnFunction(phaseName: String, tree: Function): Nothing = {

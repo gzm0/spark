@@ -39,8 +39,6 @@ abstract class SparkREPLPlugin(val global: Global) extends Plugin {
     def naming: interpreter.Naming = SparkREPLPlugin.this.naming
   }
 
-
-
   object StateClosureRecorderComponent extends {
     val global: SparkREPLPlugin.this.global.type = SparkREPLPlugin.this.global
     val addons: SparkREPLPlugin.this.addons.type = SparkREPLPlugin.this.addons
@@ -53,7 +51,7 @@ abstract class SparkREPLPlugin(val global: Global) extends Plugin {
     val global: SparkREPLPlugin.this.global.type = SparkREPLPlugin.this.global
     val addons: SparkREPLPlugin.this.addons.type = SparkREPLPlugin.this.addons
     override val runsAfter = List("spark-closurerecord")
-    override val runsBefore = List()
+    override val runsBefore = List("explicitouter")
   } with StateClosureTransformer
 
 }

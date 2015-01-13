@@ -72,6 +72,7 @@ trait StateClosureRecorder extends plugins.PluginComponent
           tree
 
         case sel: Select if canCaptureReplState(sym) =>
+          transform(sel.qualifier)
           recordUsage(tree.symbol, usedTerms)
           tree
 
