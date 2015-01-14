@@ -50,6 +50,16 @@ trait StateClosureTransformer extends plugins.PluginComponent
     val deserialized: TermName = basePrefix.append("deserialized")
   }
 
+  object serializationNme {
+    val writeObject = newTermName("writeObject")
+    val readObject = newTermName("readObject")
+    val readObjectNoData = newTermName("readObjectNoData")
+    val writeReplace = newTermName("writeReplace")
+    val readResolve = newTermName("readResolve")
+
+    val all = List(writeObject, readObject, readObjectNoData, writeReplace, readResolve)
+  }
+
   override def newPhase(p: nsc.Phase) = new StateClosureTransformerPhase(p)
 
   class StateClosureTransformerPhase(prev: nsc.Phase) extends Phase(prev) {
@@ -81,10 +91,15 @@ trait StateClosureTransformer extends plugins.PluginComponent
    * // subclassing and traits
    * trait Foo { def foo = x }
    * case class A extends Foo
+   *
+   * // using state in ctor
+   *
+   * // subclass of class that has custom writeObject / readObject
    */
 
   class StateClosureTransformer extends Transformer {
     private[this] var currentPatchClass: Symbol = NoSymbol
+    private def isPatching = currentPatchClass != NoSymbol
 
     override def transform(tree: Tree): Tree = {
       val sym = tree.symbol
@@ -94,9 +109,16 @@ trait StateClosureTransformer extends plugins.PluginComponent
 
           if (neededState.nonEmpty && sym.isSerializable) {
             println(s"$sym needs state: $neededState")
-
-            // TODO distinguish class / trait
-            patchClass(classDef, neededState)
+            if (sym.isClass) {
+              patchClass(classDef, neededState)
+            } else if (sym.isTrait) {
+              // FIXME support this
+              reporter.error(sym.pos, "Traits capturing state are not yet supported")
+              super.transform(tree)
+            } else {
+              throw new AssertionError(
+                  "Found non-class and non-trait marked to capture state: " + sym.fullName)
+            }
           } else {
             import classDef._
             val newImpl = transformTemplate(classDef.impl)
@@ -116,8 +138,14 @@ trait StateClosureTransformer extends plugins.PluginComponent
             treeCopy.DefDef(defDef, mods, name, tparams, vparamss, tpt, newRhs)
           }
 
-        case Apply(receiver, args) if currentPatchClass != NoSymbol &&
-            canCaptureReplState(sym) =>
+        case Apply(_, args) if isPatching && canCaptureReplState(sym) =>
+          // FIXME find a way to evaluate receiver
+
+          /* Note that when transforming accesses to calls to top-level REPL
+           * members, we can safely discard the receiver, since it is a
+           * REPL wrapper. No one can (should) write a side-effecting method
+           * that returns a REPL wrapper.
+           */
           val neededState = calculateCapturedState(sym)
 
           val isStateAccessor = sym.isAccessor && neededState.size == 1 && {
@@ -134,19 +162,13 @@ trait StateClosureTransformer extends plugins.PluginComponent
             val accessorName = sparkNme.stateAccessor(stateField)
             val stateAccessor = currentPatchClass.tpe.member(accessorName)
 
+            assert(stateField.isStatic, "Found non-static state field")
             assert(stateAccessor != NoSymbol,
                 s"Could not find accessor for state ${stateField.name}")
 
-            println("Patching accessor for: " + stateField.name)
-            println("Accessor is: " + stateAccessor)
-
-            BLOCK(
-                receiver, // do not discard side effects of receiver
-                fn(THIS(currentPatchClass), stateAccessor)
-            )
-            // FIXME upper "correct" code carshes icode
-            super.transform(tree)
+            REF(stateAccessor)
           } else {
+            // TODO make sure no one sets worksheet state when not on master
             super.transform(tree) // TODO do general transform
           }
 
@@ -168,11 +190,11 @@ trait StateClosureTransformer extends plugins.PluginComponent
       val superClassState = calculateCapturedState(superSym)
 
       if (superClassState.nonEmpty && !superSym.isSerializable) {
-        val stateString = superClassState.map { state =>
-          nme.localToGetter(state.name)
-        }.mkString("[", ", ", "]")
+        val stateNames = superClassState.map(s => nme.localToGetter(s.name))
+        val stateString = stateNames.mkString("[", ", ", "]")
 
-        reporter.error(classDef.pos, s"Serializable $clsSym extends $superSym which is not " +
+        reporter.error(classDef.pos,
+            s"Serializable $clsSym extends $superSym which is not " +
             s"serializable but captures following REPL state: $stateString.")
         classDef
       } else {
@@ -185,6 +207,9 @@ trait StateClosureTransformer extends plugins.PluginComponent
 
         // Generate state members
         val stateMembers = genStateMembers(clsSym, trulyCapturedState)
+
+        // Generate serialization interceptors
+        val _ = genSerializationIntercepts(clsSym)
 
         // Put it all together
         val newTempl = {
@@ -250,6 +275,24 @@ trait StateClosureTransformer extends plugins.PluginComponent
     }
 
     stateFieldTrees ++ stateAccessorTrees
+  }
+
+  private def genSerializationIntercepts(clsSym: Symbol): List[Tree] = {
+
+    // Check if serialization customization is present. If yes, fail
+    // TODO check for argumnt types as well
+    for {
+      name <- serializationNme.all
+      sym = clsSym.tpe.decls.lookup(name)
+      if sym != NoSymbol
+    } {
+      reporter.error(sym.pos, "A class that captures REPL state may not contain " +
+          "methods that alter (Java) serialization behavior")
+    }
+
+    // TODO continue
+
+    Nil
   }
 
   /** Fixpoint of the state needed by a given symbol based on annotation.
