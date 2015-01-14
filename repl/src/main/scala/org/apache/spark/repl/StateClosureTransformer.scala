@@ -19,11 +19,12 @@ package org.apache.spark.repl
 
 import scala.tools.nsc
 import scala.tools.nsc._
-
 import scala.collection.mutable
+import scala.tools.nsc.ast.TreeDSL
 
 trait StateClosureTransformer extends plugins.PluginComponent
-                                  with transform.Transform {
+                                  with transform.Transform
+                                  with ast.TreeDSL {
 
   val addons: GlobalAddons {
     val global: StateClosureTransformer.this.global.type
@@ -35,7 +36,19 @@ trait StateClosureTransformer extends plugins.PluginComponent
 
   val phaseName = "spark-closuretransform"
 
-  val prefix = newTermName("$spark$repl$")
+  object sparkNme {
+    private val basePrefix = newTermName("spark$repl$")
+    private val statePrefix = basePrefix.append("state$")
+    private val accPrefix = basePrefix.append("acc$")
+
+    def stateField(sym: Symbol): TermName =
+      statePrefix.append(nme.localToGetter(sym.name))
+
+    def stateAccessor(sym: Symbol): TermName =
+      accPrefix.append(nme.localToGetter(sym.name))
+
+    val deserialized: TermName = basePrefix.append("deserialized")
+  }
 
   override def newPhase(p: nsc.Phase) = new StateClosureTransformerPhase(p)
 
@@ -71,6 +84,8 @@ trait StateClosureTransformer extends plugins.PluginComponent
    */
 
   class StateClosureTransformer extends Transformer {
+    private[this] var currentPatchClass: Symbol = NoSymbol
+
     override def transform(tree: Tree): Tree = {
       val sym = tree.symbol
       tree match {
@@ -101,6 +116,41 @@ trait StateClosureTransformer extends plugins.PluginComponent
             treeCopy.DefDef(defDef, mods, name, tparams, vparamss, tpt, newRhs)
           }
 
+        case Apply(receiver, args) if currentPatchClass != NoSymbol &&
+            canCaptureReplState(sym) =>
+          val neededState = calculateCapturedState(sym)
+
+          val isStateAccessor = sym.isAccessor && neededState.size == 1 && {
+            val accessed = sym.accessed
+            isReplState(accessed) && neededState.head == accessed
+          }
+
+          if (isStateAccessor) {
+            import CODE._
+
+            assert(args.isEmpty, "Accessor with non-empty argument list!")
+
+            val stateField = neededState.head
+            val accessorName = sparkNme.stateAccessor(stateField)
+            val stateAccessor = currentPatchClass.tpe.member(accessorName)
+
+            assert(stateAccessor != NoSymbol,
+                s"Could not find accessor for state ${stateField.name}")
+
+            println("Patching accessor for: " + stateField.name)
+            println("Accessor is: " + stateAccessor)
+
+            BLOCK(
+                receiver, // do not discard side effects of receiver
+                fn(THIS(currentPatchClass), stateAccessor)
+            )
+            // FIXME upper "correct" code carshes icode
+            super.transform(tree)
+          } else {
+            super.transform(tree) // TODO do general transform
+          }
+
+
         case fun: Function =>
           failOnFunction(phaseName, fun)
 
@@ -110,39 +160,96 @@ trait StateClosureTransformer extends plugins.PluginComponent
     }
 
     private def patchClass(classDef: ClassDef, neededState: Set[Symbol]): ClassDef = {
-      val sym = classDef.symbol
+      val clsSym = classDef.symbol
 
-      require(sym.isSerializable)
+      require(clsSym.isSerializable)
 
-      val superClassState = calculateCapturedState(sym.superClass)
+      val superSym = clsSym.superClass
+      val superClassState = calculateCapturedState(superSym)
 
-      if (superClassState.nonEmpty && !sym.superClass.isSerializable) {
-        val stateString = superClassState.map(_.name).mkString("[", ", ", "]")
-        reporter.error(classDef.pos, s"Serializable $sym extends ${sym.superClass} which is not " +
+      if (superClassState.nonEmpty && !superSym.isSerializable) {
+        val stateString = superClassState.map { state =>
+          nme.localToGetter(state.name)
+        }.mkString("[", ", ", "]")
+
+        reporter.error(classDef.pos, s"Serializable $clsSym extends $superSym which is not " +
             s"serializable but captures following REPL state: $stateString.")
         classDef
       } else {
-        val trulyCapturedState = neededState -- superClassState
+        val trulyCapturedState = (neededState -- superClassState).toList
 
-        val stateFields = for {
-          state <- trulyCapturedState
-        } yield {
-          val fldSym =
-            sym.newVariable(prefix append state.name, NoPosition, Flag.PROTECTED)
-          fldSym.setInfo(state.tpe)
-          sym.info.decls.enter(fldSym)
-        }
+        // Generate the is deserialized field if necessary
+        val deserializedField =
+          if (superClassState.nonEmpty) Nil
+          else List(genSerializedField(clsSym))
 
+        // Generate state members
+        val stateMembers = genStateMembers(clsSym, trulyCapturedState)
+
+        // Put it all together
         val newTempl = {
           val templ = classDef.impl
-          val valDefs = stateFields.map(sym => typer.typed(ValDef(sym))).toList
-          val newBody = valDefs ++ templ.body.map(transform)
+          val patchedBody = withPatchingClass(clsSym)(templ.body.map(transform))
+          val newBody = deserializedField ++ stateMembers ++ patchedBody
           treeCopy.Template(templ, templ.parents, templ.self, newBody)
         }
 
-        treeCopy.ClassDef(classDef, classDef.mods, classDef.name, classDef.tparams, newTempl)
+        treeCopy.ClassDef(classDef, classDef.mods, classDef.name,
+            classDef.tparams, newTempl)
       }
     }
+
+    private def withPatchingClass[T](patchClass: Symbol)(body: => T): T = {
+      val oldPatchClass = currentPatchClass
+      currentPatchClass = patchClass
+      try body
+      finally currentPatchClass = oldPatchClass
+    }
+  }
+
+  private def genSerializedField(clsSym: Symbol): Tree = {
+    import CODE._
+    val fieldSym = addField(clsSym, sparkNme.deserialized, definitions.BooleanTpe)
+    VAL(fieldSym) === LIT(false)
+  }
+
+  private def genStateMembers(clsSym: Symbol, capturedState: List[Symbol]): List[Tree] = {
+    val stateFieldSyms = for {
+      state <- capturedState
+    } yield {
+      val fieldName = sparkNme.stateField(state)
+      addField(clsSym, fieldName, state.tpe)
+    }
+
+    val stateFieldTrees = for {
+      fieldSym <- stateFieldSyms
+    } yield {
+      import CODE._
+      VAL(fieldSym) === EmptyTree
+    }
+
+    // Lookup the deserialized field. It might be in the superclass
+    val deserializedField = clsSym.info.member(sparkNme.deserialized)
+
+    val stateAccessorTrees = for {
+      (state, field) <- capturedState zip stateFieldSyms
+    } yield {
+      import CODE._
+
+      val accName = sparkNme.stateAccessor(state)
+      val accSym = addAccessor(clsSym, accName, state.tpe)
+
+      DEF(accSym) === {
+        IF (REF(deserializedField)) THEN {
+          REF(field)
+        } ELSE {
+          assert(state.isStatic, "Encountered non-static state field")
+          REF(accessorOf(state))
+        }
+      }
+    }
+
+    stateFieldTrees ++ stateAccessorTrees
   }
 
   /** Fixpoint of the state needed by a given symbol based on annotation.
@@ -176,5 +283,24 @@ trait StateClosureTransformer extends plugins.PluginComponent
 
     neededState.toSet
   }
+
+  private val memberFlags = 0
+
+  private def addField(clsSym: Symbol, name: TermName, tpe: Type): Symbol = {
+    val fldSym = clsSym.newVariable(name, NoPosition, memberFlags)
+    fldSym.setInfo(tpe)
+    clsSym.info.decls.enter(fldSym)
+    fldSym
+  }
+
+  private def addAccessor(clsSym: Symbol, name: TermName, retTpe: Type): Symbol = {
+    val accSym = clsSym.newMethod(name, NoPosition, memberFlags)
+    accSym.setInfo(MethodType(Nil, retTpe))
+    clsSym.info.decls.enter(accSym)
+    accSym
+  }
+
+  private def accessorOf(sym: Symbol) =
+    sym.owner.tpe.member(nme.localToGetter(sym.name))
 
 }

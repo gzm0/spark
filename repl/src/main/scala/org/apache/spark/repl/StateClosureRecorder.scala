@@ -47,12 +47,12 @@ trait StateClosureRecorder extends plugins.PluginComponent
     new StateClosureRecorderTransformer
 
   class StateClosureRecorderTransformer extends Transformer {
-    type UsageRecord = mutable.Map[Symbol, mutable.Buffer[Symbol]]
+    private type UsageRecord = mutable.Map[Symbol, mutable.Buffer[Symbol]]
 
-    var currentClosure: Symbol = _
+    private[this] var currentClosure: Symbol = NoSymbol
 
-    val instantiatedClasses: UsageRecord = mutable.Map.empty
-    val usedTerms: UsageRecord = mutable.Map.empty
+    private[this] val instantiatedClasses: UsageRecord = mutable.Map.empty
+    private[this] val usedTerms: UsageRecord = mutable.Map.empty
 
     override def transform(tree: Tree): Tree = {
       val sym = tree.symbol
@@ -99,7 +99,7 @@ trait StateClosureRecorder extends plugins.PluginComponent
     }
 
     private def recordUsage(sym: Symbol, target: UsageRecord) = {
-      if (currentClosure != null) {
+      if (currentClosure != NoSymbol) {
         target.getOrElseUpdate(currentClosure, mutable.Buffer.empty) += sym
       }
     }
