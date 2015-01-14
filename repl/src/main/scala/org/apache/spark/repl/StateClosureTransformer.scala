@@ -33,6 +33,7 @@ trait StateClosureTransformer extends plugins.PluginComponent
   import global._
   import rootMirror._
   import addons._
+  import definitions._
 
   val phaseName = "spark-closuretransform"
 
@@ -50,14 +51,28 @@ trait StateClosureTransformer extends plugins.PluginComponent
     val deserialized: TermName = basePrefix.append("deserialized")
   }
 
-  object serializationNme {
-    val writeObject = newTermName("writeObject")
-    val readObject = newTermName("readObject")
-    val readObjectNoData = newTermName("readObjectNoData")
-    val writeReplace = newTermName("writeReplace")
-    val readResolve = newTermName("readResolve")
+  object javaSer {
+    object nme {
+      val writeObject = newTermName("writeObject")
+      val readObject = newTermName("readObject")
+      val readObjectNoData = newTermName("readObjectNoData")
+      val writeReplace = newTermName("writeReplace")
+      val readResolve = newTermName("readResolve")
+      val out = newTermName("out")
+      val in = newTermName("in")
+    }
 
-    val all = List(writeObject, readObject, readObjectNoData, writeReplace, readResolve)
+    object definitions {
+      lazy val ObjectOutputStreamClass = getRequiredClass("java.io.ObjectOutputStream")
+      lazy val ObjectOutputStreamTpe = ObjectOutputStreamClass.tpe
+      lazy val ObjectOutputStream_defaultWriteObject =
+        getMemberMethod(ObjectOutputStreamClass, newTermName("defaultWriteObject"))
+
+      lazy val ObjectInputStreamClass = getRequiredClass("java.io.ObjectInputStream")
+      lazy val ObjectInputStreamTpe = ObjectInputStreamClass.tpe
+      lazy val ObjectInputStream_defaultReadObject =
+        getMemberMethod(ObjectInputStreamClass, newTermName("defaultReadObject"))
+    }
   }
 
   override def newPhase(p: nsc.Phase) = new StateClosureTransformerPhase(p)
@@ -95,7 +110,20 @@ trait StateClosureTransformer extends plugins.PluginComponent
    * // using state in ctor
    *
    * // subclass of class that has custom writeObject / readObject
+   *
+   *
    */
+
+   // Test cases
+
+   /*
+    * var x = 1
+    * case class A(y: Int) { def sum = x + y }
+    * val as = List.tabulate(10)(new A(_))
+    * sc.parallelize(as).map(_.sum).reduce(_ + _)
+    * x = 2
+    * sc.parallelize(as).map(_.sum).reduce(_ + _)
+    */
 
   class StateClosureTransformer extends Transformer {
     private[this] var currentPatchClass: Symbol = NoSymbol
@@ -160,11 +188,9 @@ trait StateClosureTransformer extends plugins.PluginComponent
 
             val stateField = neededState.head
             val accessorName = sparkNme.stateAccessor(stateField)
-            val stateAccessor = currentPatchClass.tpe.member(accessorName)
+            val stateAccessor = getMemberMethod(currentPatchClass, accessorName)
 
             assert(stateField.isStatic, "Found non-static state field")
-            assert(stateAccessor != NoSymbol,
-                s"Could not find accessor for state ${stateField.name}")
 
             REF(stateAccessor)
           } else {
@@ -209,15 +235,26 @@ trait StateClosureTransformer extends plugins.PluginComponent
         val stateMembers = genStateMembers(clsSym, trulyCapturedState)
 
         // Generate serialization interceptors
-        val _ = genSerializationIntercepts(clsSym)
+        val intercepts = genSerializationIntercepts(clsSym, trulyCapturedState)
+
+        // Patch the calls to state in the body of the class
+        val template = classDef.impl
+        val patchedBody = withPatchingClass(clsSym) {
+          transformStats(template.body, template.symbol)
+        }
+
+        // We have our new class body!
+        val newBody = (
+            deserializedField ++
+            stateMembers ++
+            intercepts ++
+            patchedBody)
 
         // Put it all together
-        val newTempl = {
-          val templ = classDef.impl
-          val patchedBody = withPatchingClass(clsSym)(templ.body.map(transform))
-          val newBody = deserializedField ++ stateMembers ++ patchedBody
-          treeCopy.Template(templ, templ.parents, templ.self, newBody)
-        }
+        val newTempl = treeCopy.Template(template,
+            transformTrees(template.parents),
+            transformValDef(template.self),
+            newBody)
 
         treeCopy.ClassDef(classDef, classDef.mods, classDef.name,
             classDef.tparams, newTempl)
@@ -234,7 +271,8 @@ trait StateClosureTransformer extends plugins.PluginComponent
 
   private def genSerializedField(clsSym: Symbol): Tree = {
     import CODE._
-    val fieldSym = addField(clsSym, sparkNme.deserialized, definitions.BooleanTpe)
+    val fieldSym = addField(clsSym, sparkNme.deserialized, BooleanTpe)
+    fieldSym.addAnnotation(TransientAttr)
     VAL(fieldSym) === LIT(false)
   }
 
@@ -254,7 +292,7 @@ trait StateClosureTransformer extends plugins.PluginComponent
     }
 
     // Lookup the deserialized field. It might be in the superclass
-    val deserializedField = clsSym.info.member(sparkNme.deserialized)
+    val deserializedField = getMemberValue(clsSym, sparkNme.deserialized)
 
     val stateAccessorTrees = for {
       (state, field) <- capturedState zip stateFieldSyms
@@ -277,22 +315,88 @@ trait StateClosureTransformer extends plugins.PluginComponent
     stateFieldTrees ++ stateAccessorTrees
   }
 
-  private def genSerializationIntercepts(clsSym: Symbol): List[Tree] = {
+  private def genSerializationIntercepts(clsSym: Symbol,
+      capturedState: List[Symbol]): List[Tree] = {
+    verifyNoCustomSerialization(clsSym)
+    List(genWriteObject(clsSym, capturedState), genReadObject(clsSym))
+  }
 
-    // Check if serialization customization is present. If yes, fail
-    // TODO check for argumnt types as well
-    for {
-      name <- serializationNme.all
-      sym = clsSym.tpe.decls.lookup(name)
-      if sym != NoSymbol
-    } {
-      reporter.error(sym.pos, "A class that captures REPL state may not contain " +
-          "methods that alter (Java) serialization behavior")
+  /**
+   * Verify that a class does not have methods that customize Java serialization
+   *
+   * Reports an error for each method that exists.
+   */
+  private def verifyNoCustomSerialization(clsSym: Symbol): Unit = {
+    import javaSer.nme._
+    import javaSer.definitions._
+
+    def checkMethod(name: TermName)(paramTypes: Symbol*)(retSym: Symbol) = {
+      val offendingSym = clsSym.tpe.declaration(name).suchThat { sym =>
+        sym.isMethod &&
+        sym.tpe.resultType.typeSymbol == retSym &&
+        sym.tpe.paramTypes.map(_.typeSymbol) == paramTypes
+      }
+
+      if (offendingSym != NoSymbol) {
+        reporter.error(offendingSym.pos,
+            "A class that captures REPL state may not contain " +
+            "methods that alter (Java) serialization behavior")
+      }
     }
 
-    // TODO continue
+    checkMethod(writeObject)(ObjectOutputStreamClass)(UnitClass)
+    checkMethod(readObject)(ObjectInputStreamClass)(UnitClass)
+    checkMethod(readObjectNoData)()(UnitClass)
+    checkMethod(writeReplace)()(ObjectClass)
+    checkMethod(readResolve)()(ObjectClass)
+  }
 
-    Nil
+  private def genWriteObject(clsSym: Symbol, capturedState: List[Symbol]): DefDef = {
+    import CODE._
+
+    val meth = clsSym.newMethod(javaSer.nme.writeObject, NoPosition, Flag.PRIVATE)
+
+    val param = meth.newValueParameter(javaSer.nme.out, NoPosition)
+    param.setInfo(javaSer.definitions.ObjectOutputStreamTpe)
+
+    meth.setInfo(MethodType(param :: Nil, UnitTpe))
+
+    clsSym.info.decls.enter(meth)
+
+    val assigns = for {
+      state <- capturedState
+    } yield {
+      val field = getMemberValue(clsSym, sparkNme.stateField(state))
+      REF(field) === REF(accessorOf(state))
+    }
+
+    val serializationCall =
+      fn(REF(param), javaSer.definitions.ObjectOutputStream_defaultWriteObject)
+
+    val deserializedField = getMemberValue(clsSym, sparkNme.deserialized)
+
+    DefDef(meth, BLOCK(
+        If(NOT(REF(deserializedField)), BLOCK(assigns: _*), EmptyTree),
+        serializationCall
+     ))
+  }
+
+  private def genReadObject(clsSym: Symbol): DefDef = {
+    import CODE._
+
+    val meth = clsSym.newMethod(javaSer.nme.readObject, NoPosition, Flag.PRIVATE)
+
+    val param = meth.newValueParameter(javaSer.nme.in, NoPosition)
+    param.setInfo(javaSer.definitions.ObjectInputStreamTpe)
+
+    meth.setInfo(MethodType(param :: Nil, UnitTpe))
+
+    clsSym.info.decls.enter(meth)
+
+    DefDef(meth, BLOCK(
+        REF(getMemberValue(clsSym, sparkNme.deserialized)) === LIT(true),
+        fn(REF(param), javaSer.definitions.ObjectInputStream_defaultReadObject)
+    ))
   }
 
   /** Fixpoint of the state needed by a given symbol based on annotation.
@@ -327,7 +431,7 @@ trait StateClosureTransformer extends plugins.PluginComponent
     neededState.toSet
   }
 
-  private val memberFlags = 0
+  private val memberFlags = Flag.PROTECTED
 
   private def addField(clsSym: Symbol, name: TermName, tpe: Type): Symbol = {
     val fldSym = clsSym.newVariable(name, NoPosition, memberFlags)
@@ -344,6 +448,6 @@ trait StateClosureTransformer extends plugins.PluginComponent
   }
 
   private def accessorOf(sym: Symbol) =
-    sym.owner.tpe.member(nme.localToGetter(sym.name))
+    getMemberMethod(sym.owner, nme.localToGetter(sym.name))
 
 }
