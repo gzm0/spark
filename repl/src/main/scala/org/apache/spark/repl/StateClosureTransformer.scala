@@ -148,9 +148,7 @@ trait StateClosureTransformer extends plugins.PluginComponent
                   "Found non-class and non-trait marked to capture state: " + sym.fullName)
             }
           } else {
-            import classDef._
-            val newImpl = transformTemplate(classDef.impl)
-            treeCopy.ClassDef(classDef, mods, name, tparams, newImpl)
+            super.transform(tree)
           }
 
         case defDef: DefDef if canCaptureReplState(sym) =>
@@ -162,8 +160,7 @@ trait StateClosureTransformer extends plugins.PluginComponent
             // TODO add second method which also accepts state
             super.transform(tree)
           } else {
-            import defDef._
-            treeCopy.DefDef(defDef, mods, name, tparams, vparamss, tpt, newRhs)
+            super.transform(tree)
           }
 
         case Apply(_, args) if isPatching && canCaptureReplState(sym) =>
@@ -207,15 +204,23 @@ trait StateClosureTransformer extends plugins.PluginComponent
       }
     }
 
+    //private def genState
+
     private def patchClass(classDef: ClassDef, neededState: Set[Symbol]): ClassDef = {
       val clsSym = classDef.symbol
 
       require(clsSym.isSerializable)
 
+      // Does our super class already store some state?
       val superSym = clsSym.superClass
       val superClassState = calculateCapturedState(superSym)
 
       if (superClassState.nonEmpty && !superSym.isSerializable) {
+        /* If we reach this point, we cannot proceed since the superclass
+         * captures REPL state, but did not get patched (it couldn't get patched
+         * since it was not marked Serializable).
+         * Therefore we must fail.
+         */
         val stateNames = superClassState.map(s => nme.localToGetter(s.name))
         val stateString = stateNames.mkString("[", ", ", "]")
 
@@ -223,7 +228,9 @@ trait StateClosureTransformer extends plugins.PluginComponent
             s"Serializable $clsSym extends $superSym which is not " +
             s"serializable but captures following REPL state: $stateString.")
         classDef
+
       } else {
+        // Calculate the state we need in addition to the super class
         val trulyCapturedState = (neededState -- superClassState).toList
 
         // Generate the is deserialized field if necessary

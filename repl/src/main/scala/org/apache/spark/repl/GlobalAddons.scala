@@ -39,6 +39,7 @@ trait GlobalAddons {
 
   def canCaptureReplState(sym: Symbol): Boolean = {
     sym.isMethod && !sym.isConstructor && isReplSym(sym, topLevel = true) ||
+    // TODO can we guard with _.isSerializable here?
     (sym.isClass || sym.isTrait) && !sym.isModuleClass &&
     // hack to avoid lazy val deadlock upon init
     sym.fullName != "$repl_$init" &&
