@@ -48,6 +48,9 @@ trait StateClosureTransformer extends plugins.PluginComponent
     def stateAccessor(sym: Symbol): TermName =
       accPrefix.append(nme.localToGetter(sym.name))
 
+    def staticForwarder(name: Name): TermName =
+      basePrefix.append(name)
+
     val deserialized: TermName = basePrefix.append("deserialized")
   }
 
@@ -173,12 +176,18 @@ trait StateClosureTransformer extends plugins.PluginComponent
            */
           val neededState = calculateCapturedState(sym)
 
+          println(s"patching: $sym")
+          println(s"neededState: ${neededState}")
+          println(s"accessed: ${sym.accessed}")
+
           val isStateAccessor = sym.isAccessor && neededState.size == 1 && {
             val accessed = sym.accessed
             isReplState(accessed) && neededState.head == accessed
           }
 
           if (isStateAccessor) {
+            // FIXME setters do not even reach here (but somehow should)...
+
             import CODE._
 
             assert(args.isEmpty, "Accessor with non-empty argument list!")
